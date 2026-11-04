@@ -1,0 +1,7 @@
+google-genai
+python-dotenv
+Pillow
+fastapi
+uvicorn
+python-multipart
+jinja2
