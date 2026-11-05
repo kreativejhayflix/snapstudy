@@ -1,5 +1,6 @@
 """
-SnapStudy Engine v2 — Returns structured JSON for the web app.
+SnapStudy Engine v4 — Chat-based AI study assistant.
+Supports text chat, photos, and PDFs with conversation memory.
 """
 
 import os
@@ -8,91 +9,122 @@ import time
 from google import genai
 from dotenv import load_dotenv
 from PIL import Image
+import fitz
 
 load_dotenv()
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 MODELS = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.0-flash"]
 
-JSON_PROMPT = """You are SnapStudy, an AI study assistant for Nigerian university students.
+SYSTEM_PROMPT = """You are SnapStudy, a friendly AI study buddy for Nigerian university students.
 
-Analyze the uploaded image of lecture notes, textbook, or past questions.
+Your personality:
+- Warm, encouraging, and patient — like a smart friend who helps with studying
+- Use simple, clear language — avoid overly academic jargon
+- Be concise — students are in a hurry, especially during exam season
+- Use emojis occasionally to keep things fun 📚⚡
+- If a student seems confused, break things down step by step
+- Offer to quiz them after explaining a topic
+- You understand the Nigerian university context (semesters, carry-overs, CGPA, past questions, etc.)
 
-You MUST respond with ONLY a valid JSON object (no markdown, no explanation outside JSON).
-
-Use this exact structure:
-{
-  "topic": "The main topic in 3-5 words",
-  "study_guide": "A clear, simplified summary of everything in the image. Use simple language. Break complex ideas into short paragraphs.",
-  "key_concepts": [
-    {"term": "Term name", "definition": "Simple one-line definition"},
-    {"term": "Term name", "definition": "Simple one-line definition"}
-  ],
-  "flashcards": [
-    {"front": "Question or term", "back": "Answer or definition"},
-    {"front": "Question or term", "back": "Answer or definition"}
-  ],
-  "questions": [
-    {
-      "question": "Exam-style question?",
-      "options": ["A) Option 1", "B) Option 2", "C) Option 3", "D) Option 4"],
-      "answer": 0,
-      "explanation": "Why this answer is correct"
-    }
-  ],
-  "exam_predictions": [
-    {"topic": "Likely exam topic", "reason": "Why it will likely appear"}
-  ]
-}
+What you can do:
+- Explain any topic from any course (Engineering, Medicine, Law, Sciences, Arts, Business, etc.)
+- Analyze photos of lecture notes, textbooks, whiteboards, or past questions
+- Read and summarize PDF handouts and slides
+- Create practice quizzes on any topic
+- Help with assignments (guide them, don't just give answers)
+- Predict likely exam questions based on topics
+- Simplify complex formulas and theories
 
 Rules:
-- Include 5-8 key concepts
-- Include 6-10 flashcards
-- Include 4-6 quiz questions (mix of easy and hard)
-- Include 2-3 exam predictions
-- The 'answer' field is the INDEX of the correct option (0, 1, 2, or 3)
-- Keep everything concise
-- If the image contains past questions, answer and explain them
-- Return ONLY valid JSON, nothing else"""
+- If a student uploads an image or PDF, analyze it thoroughly and explain the content
+- If they ask a follow-up question about the image/PDF, use your previous analysis
+- Keep responses under 300 words unless the student asks for more detail
+- If you don't know something, be honest — don't make things up
+- Format your responses clearly with bullet points and bold text when helpful
+- Never refuse to help with a study-related question"""
 
 
-def snap_study(image_path):
-    if not os.path.exists(image_path):
-        return {"error": "File not found"}
-
+def pdf_to_images(pdf_path, max_pages=3):
+    """Convert PDF pages to PIL Images."""
+    images = []
     try:
-        img = Image.open(image_path)
+        doc = fitz.open(pdf_path)
+        total_pages = min(len(doc), max_pages)
+        for page_num in range(total_pages):
+            page = doc[page_num]
+            pix = page.get_pixmap(dpi=200)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            images.append(img)
+        doc.close()
     except Exception as e:
-        return {"error": f"Cannot open image: {e}"}
+        print(f"Error converting PDF: {e}")
+    return images
 
+
+def chat(message, history=None, file_path=None):
+    """
+    Chat with the AI. Supports text, images, and PDFs.
+    history: list of {"role": "user"/"assistant", "content": "..."}
+    """
+    if history is None:
+        history = []
+
+    # Build the conversation for Gemini
+    contents = []
+
+    # Add system prompt as the first user message
+    contents.append({"role": "user", "parts": [{"text": SYSTEM_PROMPT}]})
+    contents.append({"role": "model", "parts": [{"text": "Got it! I'm SnapStudy, your study buddy. Let's ace these exams together! ⚡📚"}]})
+
+    # Add conversation history (last 10 messages to save tokens)
+    recent_history = history[-10:] if len(history) > 10 else history
+    for msg in recent_history:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+    # Build the current message
+    current_parts = []
+
+    # Handle file attachment
+    if file_path and os.path.exists(file_path):
+        is_pdf = file_path.lower().endswith(".pdf")
+
+        if is_pdf:
+            images = pdf_to_images(file_path, max_pages=3)
+            if images:
+                for img in images:
+                    current_parts.append(img)
+                file_note = f"[Student uploaded a PDF with {len(images)} page(s)]. "
+            else:
+                file_note = "[Student tried to upload a PDF but it couldn't be read]. "
+        else:
+            try:
+                img = Image.open(file_path)
+                current_parts.append(img)
+                file_note = "[Student uploaded a photo of their notes]. "
+            except Exception:
+                file_note = "[Student tried to upload an image but it couldn't be read]. "
+
+        # Combine file note with message
+        if message.strip():
+            current_parts.append({"text": file_note + message})
+        else:
+            current_parts.append({"text": file_note + "Please analyze this and explain the key concepts."})
+    else:
+        current_parts.append({"text": message})
+
+    contents.append({"role": "user", "parts": current_parts})
+
+    # Try each model with retries
     for model_name in MODELS:
         for attempt in range(1, 4):
             try:
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=[JSON_PROMPT, img]
+                    contents=contents
                 )
-
-                text = response.text.strip()
-                # Remove markdown code blocks if present
-                if text.startswith("```"):
-                    text = text.split("\n", 1)[1]
-                if text.endswith("```"):
-                    text = text.rsplit("```", 1)[0]
-                text = text.strip()
-
-                data = json.loads(text)
-                return data
-
-            except json.JSONDecodeError:
-                return {
-                    "topic": "Study Notes",
-                    "study_guide": text if 'text' in dir() else "Could not parse response.",
-                    "key_concepts": [],
-                    "flashcards": [],
-                    "questions": [],
-                    "exam_predictions": []
-                }
+                return response.text
 
             except Exception as e:
                 error_msg = str(e)
@@ -105,6 +137,6 @@ def snap_study(image_path):
                     time.sleep(30)
                     continue
                 else:
-                    return {"error": str(e)}
+                    return f"Sorry, something went wrong 😅 Error: {e}"
 
-    return {"error": "All models failed. Try again later."}
+    return "Sorry, the AI servers are really busy right now 😓 Try again in a minute!"
