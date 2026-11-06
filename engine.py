@@ -13,30 +13,28 @@ def get_client():
     return genai.Client(api_key=GEMINI_API_KEY)
 
 def convert_pdf_to_images(pdf_bytes, max_pages=5):
-    """Converts up to max_pages of a PDF into compressed images for fast processing."""
     images = []
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for page_num in range(min(len(doc), max_pages)):
-        page = doc.load_page(page_num)
-        # 120 DPI provides sharp handwriting reading while keeping file size small & fast
-        pix = page.get_pixmap(dpi=120)
-        img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
-        images.append(img)
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page_num in range(min(len(doc), max_pages)):
+            page = doc.load_page(page_num)
+            pix = page.get_pixmap(dpi=120)
+            img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
+            images.append(img)
+    except Exception as e:
+        print(f"PDF Error: {e}")
     return images
 
 def chat(prompt: str, file_bytes: bytes = None, mime_type: str = None, history: list = None) -> str:
     client = get_client()
     
-    # System prompt optimized for speed & clear, concise Nigerian mobile study responses
     system_instruction = (
         "You are SnapStudy, an expert Nigerian university study buddy. "
-        "Keep answers concise, direct, clear, and quick to read on mobile screens. "
-        "Use simple formatting, bold key terms, and bullet points. Avoid unnecessary fluff."
+        "Provide concise, direct answers with bold key terms and bullet points. "
+        "Keep it very fast and readable for mobile students."
     )
     
     contents = []
-    
-    # Process file if provided
     if file_bytes:
         if mime_type and mime_type.startswith("image/"):
             img = Image.open(io.BytesIO(file_bytes))
@@ -45,14 +43,13 @@ def chat(prompt: str, file_bytes: bytes = None, mime_type: str = None, history: 
             pdf_images = convert_pdf_to_images(file_bytes)
             contents.extend(pdf_images)
             
-    # Include student message
     if prompt:
         contents.append(prompt)
     elif not contents:
-        contents.append("Hello! How can I help with your studies today?")
+        contents.append("Hello! How can I help you study today?")
 
-    # Recommended fast Gemini models loop
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # CORRECTED MODEL NAMES
+    models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-8b"]
     
     for model_name in models_to_try:
         try:
@@ -61,11 +58,12 @@ def chat(prompt: str, file_bytes: bytes = None, mime_type: str = None, history: 
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
-                    temperature=0.4, # Lower temperature = faster, focused output
+                    temperature=0.4,
                 )
             )
             return response.text
         except Exception as e:
+            print(f"Failed with {model_name}: {e}")
             continue
 
-    return "Sorry, I am having trouble connecting right now. Please try again!"
+    return "AI is temporarily busy. Please send your message again in a few seconds!"
